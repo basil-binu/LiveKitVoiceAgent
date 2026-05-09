@@ -154,7 +154,11 @@ def llm_node(state: State, config: RunnableConfig) -> State:
         
         
         # Add system prompt
-        system_prompt = get_system_prompt()
+        system_prompt = config["configurable"].get(
+            "system_prompt"
+        )
+
+
         conversation = [SystemMessage(content=system_prompt)] + clean
         
         # Log token usage

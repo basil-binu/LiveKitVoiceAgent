@@ -1,11 +1,8 @@
-"""
-agent.py — Pete's Inn Voice Agent (LiveKit + LangGraph)
-"""
-
 import asyncio
 import logging
-import random
 import re
+import json
+
 from dotenv import load_dotenv
 
 load_dotenv(".env.local")
@@ -19,77 +16,124 @@ from livekit.agents import (
     cli,
 )
 
-from livekit.plugins import sarvam, cartesia, silero
+from livekit.plugins import (
+    sarvam,
+    cartesia,
+    silero,
+)
+
 from graph.graph_voice import graph
 
 logger = logging.getLogger("agent")
+
 logging.basicConfig(level=logging.INFO)
-
-
 
 # =========================================================
 # CLEANUP
 # =========================================================
 
-_CLEAN_RE = re.compile(r"http\S+|[•\*#`]")
+_CLEAN_RE = re.compile(
+    r"http\S+|[•\*#`]"
+)
 
-def clean(text: str) -> str:
-    return re.sub(r"\n", " ", _CLEAN_RE.sub("", text)).strip()
+def clean(text: str):
+
+    return re.sub(
+        r"\n",
+        " ",
+        _CLEAN_RE.sub("", text),
+    ).strip()
 
 # =========================================================
 # AGENT
 # =========================================================
 
-class PetesInnAssistant(Agent):
+class VoiceAssistant(Agent):
 
-    def __init__(self, thread_id: str,system_prompt: str = None):
+    def __init__(self, thread_id: str):
 
         super().__init__(
-            instructions=(" "),
+            instructions=" ",
             allow_interruptions=True,
         )
 
         self._thread_id = thread_id
+        self._room = None
 
-        logger.info(f" AGENT CREATED thread={thread_id}")
+        logger.info(
+            f"AGENT CREATED thread={thread_id}"
+        )
 
     async def on_enter(self):
-        logger.info(" on_enter FIRED")
 
-    async def on_user_turn_completed(self, turn_ctx, new_message):
+        logger.info("on_enter FIRED")
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx,
+        new_message,
+    ):
 
         transcript = new_message.text_content
 
         logger.info(
-            f" USER SAID: {transcript!r}"
+            f"USER SAID: {transcript!r}"
         )
 
-        if not transcript or not transcript.strip():
-            logger.info(" Empty transcript")
+        if (
+            not transcript
+            or not transcript.strip()
+        ):
             return
 
-        session = self.session
+        # =====================================================
+        # GET ROOM METADATA
+        # =====================================================
+
+        room_info = self._room
+
+        metadata = json.loads(
+            room_info.metadata or "{}"
+        )
+
+        system_prompt = metadata.get(
+            "system_prompt",
+            "",
+        )
+
+        logger.info(
+            f"SYSTEM PROMPT: {system_prompt}"
+        )
+
+        # =====================================================
+        # LANGGRAPH CONFIG
+        # =====================================================
 
         config = {
             "configurable": {
-                "thread_id": self._thread_id
+                "thread_id":
+                    self._thread_id,
+
+                "system_prompt":
+                    system_prompt,
             }
         }
 
         loop = asyncio.get_running_loop()
 
         full_response = ""
-        filler_sent = False
 
-        # =========================================================
-        # RUN LANGGRAPH
-        # =========================================================
+        # =====================================================
+        # RUN GRAPH
+        # =====================================================
 
         def run_graph():
 
             nonlocal full_response
 
-            logger.info(" graph.stream START")
+            logger.info(
+                "graph.stream START"
+            )
 
             for chunk, _ in graph.stream(
                 {"messages": transcript},
@@ -97,7 +141,10 @@ class PetesInnAssistant(Agent):
                 stream_mode="messages",
             ):
 
-                if not hasattr(chunk, "content"):
+                if not hasattr(
+                    chunk,
+                    "content",
+                ):
                     continue
 
                 if type(chunk).__name__ not in (
@@ -107,29 +154,35 @@ class PetesInnAssistant(Agent):
                     continue
 
                 if chunk.content:
-                    full_response += chunk.content
+                    full_response += (
+                        chunk.content
+                    )
 
             logger.info(
-                f" graph.stream DONE response={full_response!r}"
+                f"graph.stream DONE response={full_response!r}"
             )
+
         await loop.run_in_executor(
             None,
             run_graph,
         )
 
-        # =========================================================
+        # =====================================================
         # FINAL RESPONSE
-        # =========================================================
+        # =====================================================
 
-        response = clean(full_response.strip())
+        response = clean(
+            full_response.strip()
+        )
 
         if not response:
-            logger.info(" Empty response")
             return
 
-        logger.info(f" FINAL RESPONSE: {response!r}")
+        logger.info(
+            f"FINAL RESPONSE: {response!r}"
+        )
 
-        await session.say(
+        await self.session.say(
             response,
             allow_interruptions=True,
         )
@@ -146,11 +199,13 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess):
 
-    logger.info(" PREWARM CALLED")
+    logger.info("PREWARM CALLED")
 
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = (
+        silero.VAD.load()
+    )
 
-    logger.info(" VAD LOADED")
+    logger.info("VAD LOADED")
 
 server.setup_fnc = prewarm
 
@@ -158,41 +213,48 @@ server.setup_fnc = prewarm
 # RTC SESSION
 # =========================================================
 
-@server.rtc_session(agent_name="petes-inn-agent")
-async def petes_inn_session(ctx: JobContext):
+@server.rtc_session(
+    agent_name="voice-agent"
+)
+async def voice_session(
+    ctx: JobContext,
+):
 
     logger.info(
-        f" SESSION STARTED room={ctx.room.name}"
+        f"SESSION STARTED room={ctx.room.name}"
     )
 
     ctx.log_context_fields = {
         "room": ctx.room.name
     }
 
-    # -----------------------------------------------------
-    # CONNECT FIRST
-    # -----------------------------------------------------
+    # =====================================================
+    # CONNECT
+    # =====================================================
 
     await ctx.connect()
 
-    logger.info(" CONNECTED")
+    logger.info("CONNECTED")
 
-    # -----------------------------------------------------
-    # CREATE AGENT
-    # -----------------------------------------------------
+    # =====================================================
+    # AGENT
+    # =====================================================
 
-    agent = PetesInnAssistant(
+    agent = VoiceAssistant(
         thread_id=ctx.room.name
     )
 
-    # -----------------------------------------------------
-    # CREATE SESSION
-    # -----------------------------------------------------
+    # IMPORTANT
+    agent._room = ctx.room
+
+    # =====================================================
+    # SESSION
+    # =====================================================
 
     session = AgentSession(
 
         stt=sarvam.STT(
-            language="unknown",
+            language="en-IN",
             model="saaras:v3",
             mode="transcribe",
         ),
@@ -201,35 +263,38 @@ async def petes_inn_session(ctx: JobContext):
 
         tts=cartesia.TTS(
             model="sonic-3",
+
             voice="6ccbfb76-1fc6-48f7-b71d-91ac6298247b",
         ),
 
         vad=ctx.proc.userdata["vad"],
     )
 
-    logger.info(" SESSION OBJECT CREATED")
+    logger.info(
+        "SESSION OBJECT CREATED"
+    )
 
-    # -----------------------------------------------------
+    # =====================================================
     # START SESSION
-    # -----------------------------------------------------
+    # =====================================================
 
     await session.start(
         agent=agent,
         room=ctx.room,
     )
 
-    logger.info(" SESSION STARTED")
+    logger.info("SESSION STARTED")
 
-    # -----------------------------------------------------
+    # =====================================================
     # GREETING
-    # -----------------------------------------------------
+    # =====================================================
 
     await session.say(
-        "Hello! Welcome to Pete's Inn Resort. How can I assist you today?",
+        "Hello! How can I help you today?",
         allow_interruptions=True,
     )
 
-    logger.info(" GREETING SENT")
+    logger.info("GREETING SENT")
 
 # =========================================================
 # MAIN

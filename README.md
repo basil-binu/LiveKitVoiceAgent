@@ -34,8 +34,8 @@ FastAPI (server.py) ← REST → Browser             uploads/
 ### 1. Clone and create a virtual environment
 
 ```bash
-git clone <your-repo-url>
-cd <repo-root>
+git clone https://github.com/basil-binu/LiveKitVoiceAgent.git
+cd LiveKitVoiceAgent
 
 python -m venv venv
 
@@ -160,7 +160,7 @@ npm run dev
 ├── .env.example
 ├── requirements.txt
 └── src/
-    ├── server.py              # FastAPI — token, upload, delete, list-docs, update-prompt
+    ├── main.py              # FastAPI — token, upload, delete, list-docs, update-prompt
     ├── agent.py               # LiveKit agent — STT → LangGraph → TTS
     ├── uploads/               # User-uploaded documents (auto-created)
     ├── index/                 # FAISS vector index (auto-created on first ingest)

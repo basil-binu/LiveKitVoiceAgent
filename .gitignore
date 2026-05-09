@@ -1,0 +1,25 @@
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# Environment variables (secrets)
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS stuff
+.DS_Store
+Thumbs.db
+
+*.json
+
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+Databases/
+database/
+databases/

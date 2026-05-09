@@ -1,4 +1,5 @@
 import os
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -14,17 +15,13 @@ load_dotenv(".env.local")
 # ==================================================
 
 EMBED_MODEL = "text-embedding-3-small"
-INDEX_PATH  = str(Path(__file__).parent.parent / "index")   # src/index
+INDEX_PATH  = str(Path(__file__).parent.parent / "index")
 
 # ==================================================
 # HELPERS
 # ==================================================
 
 def _get_retriever():
-    """
-    Reload FAISS index fresh on every call so newly
-    uploaded files are immediately visible to the agent.
-    """
     embeddings = OpenAIEmbeddings(
         model=EMBED_MODEL,
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -49,19 +46,34 @@ def _format_rag_docs(docs: list) -> str:
 
 # ==================================================
 # RAG TOOL
+# Returns JSON: { "content": "...", "sources": ["file1.pdf", ...] }
+# graph_voice.py reads this to extract sources for the UI
 # ==================================================
 
 @tool
 def rag_tool(query: str) -> str:
     """Retrieve information about the homestay."""
     try:
-        retriever = _get_retriever()        # fresh load every time
+        retriever = _get_retriever()
         docs = retriever.invoke(query)
+
         if not docs:
-            return ""
-        return _format_rag_docs(docs)
+            return json.dumps({"content": "", "sources": []})
+
+        sources = list({
+            doc.metadata.get("source", "unknown")
+            for doc in docs
+        })
+
+        content = _format_rag_docs(docs)
+
+        return json.dumps({
+            "content": content,
+            "sources": sources,
+        })
+
     except Exception as e:
-        return f"RAG_ERROR::{e}"
+        return json.dumps({"content": f"RAG_ERROR::{e}", "sources": []})
 
 # ==================================================
 # TOOL REGISTRY

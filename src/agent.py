@@ -122,6 +122,7 @@ class VoiceAssistant(Agent):
         loop = asyncio.get_running_loop()
 
         full_response = ""
+        rag_sources   = []
 
         # =====================================================
         # RUN GRAPH
@@ -129,14 +130,14 @@ class VoiceAssistant(Agent):
 
         def run_graph():
 
-            nonlocal full_response
+            nonlocal full_response, rag_sources
 
             logger.info(
                 "graph.stream START"
             )
 
             for chunk, _ in graph.stream(
-                {"messages": transcript},
+                {"messages": transcript, "rag_sources": []},
                 config,
                 stream_mode="messages",
             ):
@@ -157,6 +158,18 @@ class VoiceAssistant(Agent):
                     full_response += (
                         chunk.content
                     )
+
+            # Get final state to read rag_sources
+            try:
+                final_state = graph.get_state(config)
+                rag_sources = final_state.values.get("rag_sources", [])
+                logger.info(
+                    f"RAG SOURCES: {rag_sources}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not read rag_sources from state: {e}"
+                )
 
             logger.info(
                 f"graph.stream DONE response={full_response!r}"
@@ -181,6 +194,29 @@ class VoiceAssistant(Agent):
         logger.info(
             f"FINAL RESPONSE: {response!r}"
         )
+
+        # =====================================================
+        # SEND RAG SOURCES TO FRONTEND
+        # =====================================================
+
+        if rag_sources:
+            try:
+                payload = json.dumps({
+                    "type":    "rag_sources",
+                    "sources": rag_sources,
+                }).encode("utf-8")
+
+                await self._room.local_participant.publish_data(
+                    payload,
+                    reliable=True,
+                )
+                logger.info(
+                    f"RAG SOURCES SENT: {rag_sources}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not send rag_sources: {e}"
+                )
 
         await self.session.say(
             response,

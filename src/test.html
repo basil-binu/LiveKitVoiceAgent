@@ -99,6 +99,58 @@
     .msg.agent  { background: #1a3a2a; color: #bbf7d0; align-self: flex-start; }
     .msg.system { background: transparent; color: #64748b; align-self: center; font-style: italic; }
 
+    /* ── RAG Sources Panel ── */
+    #rag-panel {
+      width: 100%;
+      max-width: 560px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #rag-panel h2 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin: 0;
+    }
+
+    #rag-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .rag-item {
+      background: #0f1117;
+      border-left: 3px solid #6366f1;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.82rem;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+
+    .rag-item .rag-source-name {
+      font-size: 0.75rem;
+      color: #6366f1;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+
+    .rag-empty {
+      font-size: 0.82rem;
+      color: #475569;
+      font-style: italic;
+      text-align: center;
+      padding: 4px 0;
+    }
+
     /* ── KB upload panel ── */
     #kb-panel {
       width: 100%;
@@ -229,6 +281,14 @@
     <div class="msg system">Conversation will appear here...</div>
   </div>
 
+  <!-- ── RAG Sources Panel ── -->
+  <div id="rag-panel">
+    <h2>🔍 Sources Used</h2>
+    <div id="rag-list">
+      <div class="rag-empty">No sources retrieved yet</div>
+    </div>
+  </div>
+
   <!-- ── Knowledge Base Panel ── -->
   <div id="kb-panel">
     <h2>📚 Knowledge Base</h2>
@@ -282,6 +342,7 @@
     const kbStatus        = document.getElementById("kb-status");
     const uploadProgress  = document.getElementById("upload-progress");
     const progressBar     = document.getElementById("progress-bar");
+    const ragList         = document.getElementById("rag-list");
 
     // =====================================================
     // HELPERS
@@ -314,6 +375,32 @@
       div.textContent = text;
       logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // =====================================================
+    // RAG SOURCES
+    // =====================================================
+    function renderRagSources(sources) {
+      if (!sources || sources.length === 0) {
+        ragList.innerHTML = `<div class="rag-empty">No sources retrieved for this response</div>`;
+        return;
+      }
+
+      ragList.innerHTML = "";
+      sources.forEach(src => {
+        const item = document.createElement("div");
+        item.className = "rag-item";
+
+        // src may be a string (filename) or an object with {source, content} etc.
+        const name    = typeof src === "string" ? src : (src.source || src.filename || src.name || "Unknown");
+        const snippet = typeof src === "object"  ? (src.content || src.snippet || src.text || "") : "";
+
+        item.innerHTML = `
+          <div class="rag-source-name">📄 ${name}</div>
+          ${snippet ? `<div>${snippet}</div>` : ""}
+        `;
+        ragList.appendChild(item);
+      });
     }
 
     // =====================================================
@@ -550,6 +637,19 @@
           micBtn.className = "connected";
           micBtn.textContent = "🎙️";
           setStatus("Connected");
+        }
+      });
+
+      // ── RAG sources from agent data channel ──────────
+      room.on(RoomEvent.DataReceived, (payload, participant) => {
+        try {
+          const text = new TextDecoder().decode(payload);
+          const msg  = JSON.parse(text);
+          if (msg.type === "rag_sources") {
+            renderRagSources(msg.sources);
+          }
+        } catch (e) {
+          console.warn("DataReceived parse error:", e);
         }
       });
 

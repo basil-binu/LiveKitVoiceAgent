@@ -1,6 +1,7 @@
 import os
+import json
 import logging
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict, List
 import httpx
 import atexit
 import asyncio
@@ -22,29 +23,20 @@ from langchain_core.runnables import RunnableConfig
 
 from .tools_voice import tools
 from .memory import memory
-from prompts.voice_agent_prompt import get_system_prompt
-
-# -------------------------------------------------------------------
-# SETUP
-# -------------------------------------------------------------------
-
 
 load_dotenv(".env.local")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
 MAX_TOKENS = 1000
-MAX_STEPS = 6
-TIMEOUT = 30
-
-
+MAX_STEPS  = 6
+TIMEOUT    = 30
 
 # LangSmith
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
-os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGCHAIN_PROJECT"] = "Production - Petes Inn Resort"
+os.environ["LANGCHAIN_TRACING_V2"]  = "true"
+os.environ["LANGSMITH_ENDPOINT"]    = "https://api.smith.langchain.com"
+os.environ["LANGSMITH_API_KEY"]     = os.getenv("LANGSMITH_API_KEY")
+os.environ["LANGCHAIN_PROJECT"]     = "Production - Petes Inn Resort"
 
 # -------------------------------------------------------------------
 # LLM
@@ -63,7 +55,6 @@ _http_client = httpx.AsyncClient(
         pool=5.0,
     ),
 )
-
 
 llm = ChatOpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
@@ -86,61 +77,81 @@ atexit.register(_cleanup)
 
 # -------------------------------------------------------------------
 # STATE
+# rag_sources accumulates source filenames across tool calls
 # -------------------------------------------------------------------
 
+def _merge_sources(a: List[str], b: List[str]) -> List[str]:
+    return list(dict.fromkeys(a + b))   # deduplicated, order preserved
+
 class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages:    Annotated[list[BaseMessage], add_messages]
+    rag_sources: Annotated[List[str], _merge_sources]
 
 # -------------------------------------------------------------------
 # MESSAGE FILTERING
 # -------------------------------------------------------------------
 
 def filter_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Keep only content, tool_calls, and tool results"""
     filtered = []
-    
     for msg in messages:
         if isinstance(msg, HumanMessage):
             filtered.append(HumanMessage(content=msg.content))
-        
         elif isinstance(msg, AIMessage):
             filtered.append(AIMessage(
                 content=msg.content or "",
-                tool_calls=getattr(msg, 'tool_calls', []),
+                tool_calls=getattr(msg, "tool_calls", []),
             ))
-        
         elif isinstance(msg, ToolMessage):
+            # Strip JSON wrapper — send only plain content to LLM
+            raw = msg.content or ""
+            try:
+                parsed = json.loads(raw)
+                plain  = parsed.get("content", raw)
+            except Exception:
+                plain = raw
+
             filtered.append(ToolMessage(
-                content=msg.content or "",
+                content=plain,
                 tool_call_id=msg.tool_call_id,
                 name=msg.name,
             ))
-    
     return filtered
+
+# -------------------------------------------------------------------
+# SOURCE EXTRACTION
+# Reads rag_tool JSON responses and collects source filenames
+# -------------------------------------------------------------------
+
+def _extract_sources(messages: list[BaseMessage]) -> List[str]:
+    sources = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        if msg.name != "rag_tool":
+            continue
+        try:
+            parsed = json.loads(msg.content or "{}")
+            sources.extend(parsed.get("sources", []))
+        except Exception:
+            pass
+    return list(dict.fromkeys(sources))
 
 # -------------------------------------------------------------------
 # LLM NODE
 # -------------------------------------------------------------------
 
 def llm_node(state: State, config: RunnableConfig) -> State:
-    """Main LLM logic with token management"""
-    
     try:
-        sender_id = config["configurable"].get("thread_id", "unknown")
+        sender_id  = config["configurable"].get("thread_id", "unknown")
         step_count = config["configurable"].get("step_count", 0)
-        
-        # Prevent infinite loops
+
         if step_count >= MAX_STEPS:
             logger.warning(f"Max steps reached for {sender_id}")
             return {
-                "messages": [AIMessage(
-                    content="I'm having trouble completing this. Can you simplify your request?"
-                )]
+                "messages": [AIMessage(content="I'm having trouble completing this. Can you simplify your request?")],
+                "rag_sources": [],
             }
-        
-        # Filter first, then trim
-        
-        
+
         trimmed = trim_messages(
             state["messages"],
             strategy="last",
@@ -151,42 +162,37 @@ def llm_node(state: State, config: RunnableConfig) -> State:
         )
         clean = filter_messages(trimmed)
 
-        
-        
-        # Add system prompt
-        system_prompt = config["configurable"].get(
-            "system_prompt"
-        )
+        # Collect any sources from tool messages in this turn
+        new_sources = _extract_sources(state["messages"])
 
+        system_prompt = config["configurable"].get("system_prompt", "")
+        conversation  = [SystemMessage(content=system_prompt)] + clean
 
-        conversation = [SystemMessage(content=system_prompt)] + clean
-        
-        # Log token usage
         tokens = count_tokens_approximately(conversation)
         logger.info(f"Tokens: {tokens} | Step: {step_count + 1} | User: {sender_id}")
-        
-        # Call LLM
 
         response = llm_with_tools.invoke(conversation)
-        
-        
-        return {"messages": [response]}
-    
+
+        return {
+            "messages":    [response],
+            "rag_sources": new_sources,
+        }
+
     except httpx.TimeoutException:
-        logger.error(f"OpenAI timeout for {sender_id} after {TIMEOUT}s")
-        return {"messages": [AIMessage(content="Sorry, the request timed out. Please try again.")]}
-    
+        logger.error(f"OpenAI timeout for {sender_id}")
+        return {"messages": [AIMessage(content="Sorry, the request timed out.")], "rag_sources": []}
+
     except httpx.ConnectError:
         logger.error(f"OpenAI connection failed for {sender_id}")
-        return {"messages": [AIMessage(content="Connection issue. Please try again.")]}
+        return {"messages": [AIMessage(content="Connection issue. Please try again.")], "rag_sources": []}
 
     except httpx.HTTPStatusError as e:
         logger.error(f"OpenAI HTTP error for {sender_id}: {e.response.status_code}")
-        return {"messages": [AIMessage(content="Service error. Please try again.")]}
-    
+        return {"messages": [AIMessage(content="Service error. Please try again.")], "rag_sources": []}
+
     except Exception as e:
         logger.error(f"Unexpected error for {sender_id}: {type(e).__name__}: {e}")
-        return {"messages": [AIMessage(content="An error occurred. Please try again.")]}
+        return {"messages": [AIMessage(content="An error occurred. Please try again.")], "rag_sources": []}
 
 # -------------------------------------------------------------------
 # GRAPH
